@@ -978,6 +978,7 @@ end
 -- =============================================
 
 function cleanup()
+  clock.cancel_all()
   if screen_metro then screen_metro:stop() end
   softcut.poll_stop_phase()
 end
