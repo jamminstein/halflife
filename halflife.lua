@@ -114,6 +114,7 @@ local current_bank_slot = 1
 local sidechain_mode = false
 local sidechain_thresh = 0.3
 local last_sidechain_trigger = 0
+local sidechain_input_level = 0
 
 -- grid
 local g = grid.connect()
@@ -121,6 +122,16 @@ local g = grid.connect()
 -- screen animation
 local screen_metro
 local wobble_t = 0
+
+-- Enhanced screen state
+local beat_phase = 0
+local popup_param = nil
+local popup_val = nil
+local popup_time = 0
+local bank_capture_flash = {}
+for i = 1, 4 do
+  bank_capture_flash[i] = 0
+end
 
 -- =============================================
 -- INIT
@@ -274,6 +285,7 @@ function init()
   local amp_poll = poll.set("amp_in_l")
   amp_poll.callback = function(val)
     input_amp = val
+    sidechain_input_level = val
   end
   amp_poll.time = 0.08
   amp_poll:start()
@@ -286,6 +298,7 @@ function init()
   clock.run(wobble_clock)
   clock.run(failure_clock)    -- Lossy packet events
   clock.run(sidechain_clock)  -- Sidechain trigger monitor
+  clock.run(beat_clock)       -- Beat phase tracking
 
   -- =============================================
   -- SCREEN
@@ -465,6 +478,8 @@ function capture_ghost_state()
   for i = 1, NUM_SEG do
     bank.seg_age[i] = seg_age[i]
   end
+  -- trigger flash
+  bank_capture_flash[current_bank_slot] = 0.3
 end
 
 function recall_ghost_state()
@@ -493,7 +508,7 @@ function sidechain_clock()
   -- When level exceeds threshold, trigger ghost generation
   while true do
     clock.sleep(0.05)
-    if sidechain_mode and input_amp > sidechain_thresh then
+    if sidechain_mode and sidechain_input_level > sidechain_thresh then
       local now = clock.get_beats()
       if now - last_sidechain_trigger > 0.2 then
         -- trigger new ghost generation
@@ -502,6 +517,18 @@ function sidechain_clock()
         summon_oldest()
       end
     end
+  end
+end
+
+-- =============================================
+-- BEAT CLOCK
+-- =============================================
+
+function beat_clock()
+  -- Track beat phase for visual animations
+  while true do
+    clock.sleep(0.01)
+    beat_phase = (beat_phase + 0.01) % 1.0
   end
 end
 
@@ -542,6 +569,13 @@ function degradation_clock()
         seg_age[i] = 0
       elseif not seg_pinned[i] then
         seg_age[i] = math.min(1.0, seg_age[i] + increment)
+      end
+    end
+
+    -- decay bank flash timers
+    for i = 1, 4 do
+      if bank_capture_flash[i] > 0 then
+        bank_capture_flash[i] = bank_capture_flash[i] - 0.1
       end
     end
   end
@@ -823,10 +857,19 @@ end
 function enc(n, d)
   if n == 1 then
     params:delta("hl_drive", d)
+    popup_param = "drive"
+    popup_val = drive_val
+    popup_time = 0.8
   elseif n == 2 then
     params:delta("hl_halflife", d)
+    popup_param = "half-life"
+    popup_val = half_life_val
+    popup_time = 0.8
   elseif n == 3 then
     params:delta("hl_ghost_mix", d)
+    popup_param = "dry/ghost"
+    popup_val = ghost_mix_val
+    popup_time = 0.8
   end
 end
 
@@ -941,54 +984,77 @@ function redraw()
   screen.font_face(1)
   screen.font_size(8)
 
-  -- ---- Title ----
-  screen.level(15)
-  screen.move(2, 8)
+  -- ---- STATUS STRIP (y 0-8) ----
+  screen.level(4)
+  screen.move(2, 7)
   screen.text("HALFLIFE")
 
-  -- status indicators (right side of title)
+  -- Beat pulse indicator (x=124, level 4)
+  local beat_pulse = 4 + math.floor(math.sin(beat_phase * math.pi * 2) * 3)
+  screen.level(beat_pulse)
+  screen.rect(123, 1, 3, 3)
+  screen.fill()
+
+  -- Memory bank slot indicator (right side, level 6)
+  screen.level(6)
+  screen.move(100, 7)
+  screen.text("BANK " .. current_bank_slot .. "/4")
+
+  -- status indicators below title
   local status_x = 68
   if ringmod_on then
     screen.level(12)
-    screen.move(status_x, 8)
+    screen.move(status_x, 7)
     screen.text("RING")
     status_x = status_x + 28
   end
   if grain_mode then
     screen.level(10)
-    screen.move(status_x, 8)
+    screen.move(status_x, 7)
     screen.text("GRAIN")
     status_x = status_x + 30
   end
   if sidechain_mode then
     screen.level(10)
-    screen.move(status_x, 8)
+    screen.move(status_x, 7)
     screen.text("SIDE")
     status_x = status_x + 20
   end
 
-  -- ---- Parameter readout ----
-  screen.level(7)
-  screen.move(2, 18)
-  screen.text("drv " .. string.format("%.1f", drive_val))
-  screen.move(42, 18)
-  screen.text("hl " .. string.format("%.2f", half_life_val))
-  screen.move(88, 18)
-  screen.text("mix " .. string.format("%.2f", ghost_mix_val))
+  -- ---- PARAMETER POPUP (enc feedback) ----
+  if popup_time > 0 then
+    popup_time = popup_time - (1.0 / 15.0)
+    screen.level(15)
+    screen.font_size(12)
+    screen.move(64, 20)
+    screen.text_center(popup_param)
+    screen.font_size(16)
+    screen.move(64, 35)
+    if popup_param == "drive" then
+      screen.text_center(string.format("%.1f", popup_val))
+    else
+      screen.text_center(string.format("%.2f", popup_val))
+    end
+    screen.font_size(8)
+  else
+    -- ---- PARAMETER READOUT (normal) ----
+    screen.level(7)
+    screen.move(2, 18)
+    screen.text("drv " .. string.format("%.1f", drive_val))
+    screen.move(42, 18)
+    screen.text("hl " .. string.format("%.2f", half_life_val))
+    screen.move(88, 18)
+    screen.text("mix " .. string.format("%.2f", ghost_mix_val))
+  end
 
-  -- ---- Memory bank indicator ----
-  screen.level(5)
-  screen.move(2, 24)
-  screen.text("bank " .. current_bank_slot)
-
-  -- ---- Buffer visualization ----
+  -- ---- BUFFER VISUALIZATION (LIVE ZONE) ----
   local bx = 2
-  local by = 30
+  local by = 45
   local bw = 124
   local bh = 20
   local sw = bw / NUM_SEG
 
-  -- draw segment health bars
+  -- draw segment health bars with enhanced ghost aging
   for i = 1, NUM_SEG do
     local age = seg_age[i]
     local life = 1.0 - age
@@ -1001,11 +1067,24 @@ function redraw()
       screen.fill()
     end
 
+    -- entropy visual noise: randomly flicker pixels proportional to entropy
+    if entropy_surge > 0.1 then
+      local noise_probability = entropy_surge * age * 0.4
+      if math.random() < noise_probability then
+        screen.level(2)
+        local nx = x + math.random(sw)
+        local ny = by + math.random(bh)
+        screen.pixel(nx, ny)
+        screen.fill()
+      end
+    end
+
     -- life bar (bright from bottom)
     if life > 0.02 then
       local bar_h = math.floor(life * (bh - 2))
-      local bar_bright = math.floor(life * 10) + 3
-      screen.level(bar_bright)
+      -- ghost aging brightness: newer ghosts brighter (level 10), older dimmer (level 3)
+      local ghost_brightness = util.linlin(0, 1, 10, 3, age)
+      screen.level(math.floor(ghost_brightness))
       screen.rect(x + 1, by + bh - 1 - bar_h, sw - 2, bar_h)
       screen.fill()
     end
@@ -1023,28 +1102,41 @@ function redraw()
   screen.rect(bx, by, bw, bh)
   screen.stroke()
 
-  -- write head: bright vertical line
+  -- write head with motion blur trail
   local wx = bx + (write_pos / BUFFER_LEN) * bw
   screen.level(15)
   screen.move(wx, by + 1)
   screen.line(wx, by + bh - 1)
   screen.stroke()
 
-  -- Ghost A position
+  -- write head trail (2-3 positions behind)
+  for trail_dist = 2, 4, 1 do
+    local trail_pos = write_pos - (trail_dist * SEG_LEN / 3)
+    if trail_pos >= 0 then
+      local trail_x = bx + (trail_pos / BUFFER_LEN) * bw
+      local trail_bright = 15 - (trail_dist * 3)
+      screen.level(trail_bright)
+      screen.move(trail_x, by + 2)
+      screen.line(trail_x, by + bh - 2)
+      screen.stroke()
+    end
+  end
+
+  -- Ghost A position (newer ghost at level 9)
   local gax = bx + (ghost_a_pos / BUFFER_LEN) * bw
   screen.level(9)
   screen.move(gax, by + 3)
   screen.line(gax, by + bh - 3)
   screen.stroke()
 
-  -- Ghost B position
+  -- Ghost B position (older ghost at level 5)
   local gbx = bx + (ghost_b_pos / BUFFER_LEN) * bw
   screen.level(5)
   screen.move(gbx, by + 5)
   screen.line(gbx, by + bh - 5)
   screen.stroke()
 
-  -- Exit position (dotted)
+  -- Exit position (dotted, level 7)
   local exx = bx + (exit_pos / BUFFER_LEN) * bw
   screen.level(7)
   for dy = 2, bh - 2, 4 do
@@ -1052,7 +1144,7 @@ function redraw()
   end
   screen.fill()
 
-  -- ---- Dynamic push meter (Onward) ----
+  -- Dynamic push meter (Onward)
   if entropy_surge > 0.05 then
     local meter_w = math.floor(entropy_surge * 30)
     screen.level(math.floor(entropy_surge * 10) + 4)
@@ -1060,16 +1152,71 @@ function redraw()
     screen.fill()
   end
 
-  -- ---- Bottom info ----
+  -- ---- MEMORY BANK INDICATORS (y ~68) ----
+  local bank_x = 2
+  local bank_y = 68
+  screen.level(3)
+  screen.move(bank_x, bank_y)
+  screen.text("BANKS:")
+  bank_x = bank_x + 40
+  for i = 1, 4 do
+    local flash_level = 3
+    if bank_capture_flash[i] > 0 then
+      flash_level = 15
+    elseif i == current_bank_slot then
+      flash_level = 10
+    end
+    screen.level(flash_level)
+    screen.rect(bank_x + (i-1) * 18, bank_y - 4, 12, 6)
+    if i == current_bank_slot then
+      screen.stroke()
+    else
+      screen.fill()
+    end
+  end
+
+  -- ---- CONTEXT BAR (y 53-58, below LIVE ZONE) ----
+  screen.level(8)
+  screen.move(2, 58)
+  screen.text("ent:" .. string.format("%.0f%%", entropy_surge * 100))
+
+  screen.level(6)
+  local ghost_count = 0
+  if ghost_a_pos > 0 then ghost_count = ghost_count + 1 end
+  if ghost_b_pos > 0 then ghost_count = ghost_count + 1 end
+  screen.move(42, 58)
+  screen.text("ghosts:" .. ghost_count)
+
+  -- sidechain state indicator
+  screen.level(5)
+  if sidechain_mode then
+    local side_indicator = sidechain_input_level > sidechain_thresh and "●" or "◦"
+    screen.move(88, 58)
+    screen.text("side:" .. side_indicator)
+  else
+    screen.move(88, 58)
+    screen.text("side:off")
+  end
+
+  -- ---- SIDECHAIN LEVEL METER (if active) ----
+  if sidechain_mode and sidechain_input_level > 0.05 then
+    local meter_h = math.floor(sidechain_input_level * 8)
+    local meter_bright = sidechain_input_level > sidechain_thresh and 12 or 6
+    screen.level(meter_bright)
+    screen.rect(110, 54 - meter_h, 4, meter_h)
+    screen.fill()
+  end
+
+  -- ---- HELP / INSTRUCTIONS ----
   screen.level(3)
   screen.font_size(8)
-  screen.move(2, 62)
+  screen.move(2, 128)
   screen.text("K2:ring  K3:ghost  K2+3:wipe")
 
   -- failure rate indicator (bottom right)
   if failure_rate_val > 0.01 then
     screen.level(4)
-    screen.move(104, 62)
+    screen.move(104, 128)
     screen.text("pkt " .. string.format("%.0f", failure_rate_val * 100))
   end
 
