@@ -17,6 +17,9 @@
 -- K2: ring mod toggle
 -- K3: summon oldest ghost
 -- K2+K3: wipe (hold both)
+-- K1+K2: capture ghost state to memory bank
+-- K1+E3: select memory bank slot
+-- K1+K3: recall selected memory bank slot
 --
 -- grid: memory heat map
 --   brightness = life remaining
@@ -26,7 +29,8 @@
 -- params menu: failure rate (Lossy),
 --   grain mode (Lost+Found),
 --   dynamic push (Onward),
---   exit interval (Thermae)
+--   exit interval (Thermae),
+--   sidechain mode, sidechain threshold
 --
 -- v2.0 @halflife
 
@@ -90,6 +94,26 @@ local entropy_surge = 0     -- 0-1, how much entropy is currently boosted
 -- Lost+Found: grain mode state
 local grain_mode = false
 local grain_size_val = 0.2  -- seconds (0.05 to 0.5)
+
+-- Memory bank system
+local memory_bank = {}
+for i = 1, 4 do
+  memory_bank[i] = {
+    ghost_a_pos = 0,
+    ghost_a_level = 0,
+    ghost_b_pos = 0,
+    ghost_b_level = 0,
+    exit_pos = 0,
+    exit_level = 0,
+    seg_age = {}
+  }
+end
+local current_bank_slot = 1
+
+-- Sidechain system
+local sidechain_mode = false
+local sidechain_thresh = 0.3
+local last_sidechain_trigger = 0
 
 -- grid
 local g = grid.connect()
@@ -201,6 +225,18 @@ function init()
     grain_size_val = v
   end)
 
+  -- ---- Sidechain trigger ----
+  params:add_option("hl_sidechain_mode", "sidechain mode", {"off", "on"}, 1)
+  params:set_action("hl_sidechain_mode", function(v)
+    sidechain_mode = (v == 2)
+  end)
+
+  params:add_control("hl_sidechain_thresh", "sidechain threshold",
+    controlspec.new(0.05, 1.0, 'lin', 0.01, 0.3))
+  params:set_action("hl_sidechain_thresh", function(v)
+    sidechain_thresh = v
+  end)
+
   -- =============================================
   -- AUDIO ROUTING
   -- =============================================
@@ -233,7 +269,7 @@ function init()
   softcut.poll_start_phase()
 
   -- =============================================
-  -- AMPLITUDE TRACKING (Onward dynamic response)
+  -- AMPLITUDE TRACKING (Onward dynamic response + sidechain)
   -- =============================================
   local amp_poll = poll.set("amp_in_l")
   amp_poll.callback = function(val)
@@ -249,6 +285,7 @@ function init()
   clock.run(ghost_clock)
   clock.run(wobble_clock)
   clock.run(failure_clock)    -- Lossy packet events
+  clock.run(sidechain_clock)  -- Sidechain trigger monitor
 
   -- =============================================
   -- SCREEN
@@ -413,6 +450,62 @@ function update_levels()
 end
 
 -- =============================================
+-- MEMORY BANK FUNCTIONS
+-- =============================================
+
+function capture_ghost_state()
+  local bank = memory_bank[current_bank_slot]
+  bank.ghost_a_pos = ghost_a_pos
+  bank.ghost_a_level = softcut.level(GHOST_A)
+  bank.ghost_b_pos = ghost_b_pos
+  bank.ghost_b_level = softcut.level(GHOST_B)
+  bank.exit_pos = exit_pos
+  bank.exit_level = softcut.level(EXIT)
+  bank.seg_age = {}
+  for i = 1, NUM_SEG do
+    bank.seg_age[i] = seg_age[i]
+  end
+end
+
+function recall_ghost_state()
+  local bank = memory_bank[current_bank_slot]
+  if bank.ghost_a_pos and bank.ghost_a_pos > 0 then
+    softcut.position(GHOST_A, bank.ghost_a_pos)
+    softcut.level(GHOST_A, bank.ghost_a_level)
+    softcut.position(GHOST_B, bank.ghost_b_pos)
+    softcut.level(GHOST_B, bank.ghost_b_level)
+    softcut.position(EXIT, bank.exit_pos)
+    softcut.level(EXIT, bank.exit_level)
+    for i = 1, NUM_SEG do
+      if bank.seg_age[i] then
+        seg_age[i] = bank.seg_age[i]
+      end
+    end
+  end
+end
+
+-- =============================================
+-- SIDECHAIN CLOCK
+-- =============================================
+
+function sidechain_clock()
+  -- Monitor input amplitude for sidechain triggering
+  -- When level exceeds threshold, trigger ghost generation
+  while true do
+    clock.sleep(0.05)
+    if sidechain_mode and input_amp > sidechain_thresh then
+      local now = clock.get_beats()
+      if now - last_sidechain_trigger > 0.2 then
+        -- trigger new ghost generation
+        last_sidechain_trigger = now
+        -- summon oldest ghost in response to external sound
+        summon_oldest()
+      end
+    end
+  end
+end
+
+-- =============================================
 -- CLOCKS
 -- =============================================
 
@@ -427,7 +520,6 @@ function degradation_clock()
     -- ---- Onward: Dynamic push ----
     -- Loud input creates an entropy surge.
     -- You're fighting the ghosts — play hard to push them away.
-    -- ---- Onward: Dynamic push ----
     if input_amp > 0.4 and dynamic_push_val > 0 then
       local push = (input_amp - 0.4) / 0.6
       entropy_surge = math.min(1.0, push * dynamic_push_val)
@@ -868,6 +960,12 @@ function redraw()
     screen.text("GRAIN")
     status_x = status_x + 30
   end
+  if sidechain_mode then
+    screen.level(10)
+    screen.move(status_x, 8)
+    screen.text("SIDE")
+    status_x = status_x + 20
+  end
 
   -- ---- Parameter readout ----
   screen.level(7)
@@ -878,11 +976,16 @@ function redraw()
   screen.move(88, 18)
   screen.text("mix " .. string.format("%.2f", ghost_mix_val))
 
+  -- ---- Memory bank indicator ----
+  screen.level(5)
+  screen.move(2, 24)
+  screen.text("bank " .. current_bank_slot)
+
   -- ---- Buffer visualization ----
   local bx = 2
-  local by = 24
+  local by = 30
   local bw = 124
-  local bh = 26
+  local bh = 20
   local sw = bw / NUM_SEG
 
   -- draw segment health bars
