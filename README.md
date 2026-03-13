@@ -1,29 +1,27 @@
-# HALFLIFE
+# halflife
 
-A monome norns script where every sound becomes a memory that slowly decays.
-
-Inspired by the Chase Bliss pedal universe: Habit, Lossy, Lost + Found, Onward, Ayahuasca, Bliss Factory, Generation Loss, Dark World, and Thermae.
-
-## Install
-
-Copy the `halflife` folder to `~/dust/code/` on your norns.
+> Memory decay processor inspired by Chase Bliss
 
 ## Controls
 
-- **E1**: fuzz drive
-- **E2**: half-life rate (decay speed)
-- **E3**: dry / ghost balance
-- **K2**: ring mod toggle
-- **K3**: summon oldest ghost
-- **K2+K3**: wipe buffer
+- **E1** — fuzz drive
+- **E2** — half-life rate (decay speed)
+- **E3** — dry / ghost balance
+- **K2** — ring mod toggle
+- **K3** — summon oldest ghost
+- **K2+K3** — wipe buffer
 
 ## Grid
 
-16-column heat map of buffer memory. Brightness = life remaining. Hold any button to pin that memory and halt its decay.
+16×8 monome grid showing buffer memory heat map. Brightness indicates life remaining; hold buttons to pin memories and halt decay.
 
-## Params Menu
+## Requirements
 
-- **failure rate** (Lossy): packet dropout/stutter/glitch probability
-- **grain mode** (Lost+Found): granular fragment playback
-- **dynamic push** (Onward): loud input accelerates decay
-- **exit interval** (Thermae): pitch shift for dying fragments
+- norns
+- grid (16×8 monome)
+
+## Install
+
+```
+;install https://github.com/jamminstein/halflife
+```
