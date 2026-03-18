@@ -81,6 +81,8 @@ local k3_held = false
 local drive_val = 1.5
 local half_life_val = 0.5
 local ghost_mix_val = 0.5
+local decay_curve = "exponential"   -- decay curve shape
+local stereo_width = 0.5            -- stereo panning width (0.0-1.0)
 
 -- Lossy: packet failure state
 local failure_rate_val = 0.3
@@ -94,6 +96,12 @@ local entropy_surge = 0     -- 0-1, how much entropy is currently boosted
 -- Lost+Found: grain mode state
 local grain_mode = false
 local grain_size_val = 0.2  -- seconds (0.05 to 0.5)
+
+-- Pitch freeze state
+local frozen = false
+local k2_hold_time = 0
+local freeze_pos = 0
+local freeze_size = 0.1     -- 100ms freeze loop
 
 -- Memory bank system
 local memory_bank = {}
@@ -190,6 +198,22 @@ function init()
     update_levels()
   end)
 
+  -- ---- Decay curve shape ----
+  params:add_option("hl_decay_curve", "decay curve",
+    {"exponential", "linear", "logarithmic", "s_curve"}, 1)
+  params:set_action("hl_decay_curve", function(v)
+    local curves = {"exponential", "linear", "logarithmic", "s_curve"}
+    decay_curve = curves[v]
+  end)
+
+  -- ---- Stereo width ----
+  params:add_control("hl_stereo_width", "stereo width",
+    controlspec.new(0.0, 1.0, 'lin', 0.01, 0.5))
+  params:set_action("hl_stereo_width", function(v)
+    stereo_width = v
+    update_stereo_pan()
+  end)
+
   -- ---- Exit path (Onward / Thermae) ----
   params:add_option("hl_exit_interval", "exit interval", EXIT_NAMES, 1)
   params:set_action("hl_exit_interval", function(v)
@@ -272,7 +296,11 @@ function init()
   end
   softcut.event_phase(function(v, pos)
     if v == WRITER then write_pos = pos
-    elseif v == GHOST_A then ghost_a_pos = pos
+    elseif v == GHOST_A then
+      ghost_a_pos = pos
+      if frozen and v == GHOST_A then
+        freeze_pos = pos
+      end
     elseif v == GHOST_B then ghost_b_pos = pos
     elseif v == EXIT then exit_pos = pos
     end
@@ -299,6 +327,7 @@ function init()
   clock.run(failure_clock)    -- Lossy packet events
   clock.run(sidechain_clock)  -- Sidechain trigger monitor
   clock.run(beat_clock)       -- Beat phase tracking
+  clock.run(k2_hold_clock)    -- K2 hold time tracker for freeze
 
   -- =============================================
   -- SCREEN
@@ -355,7 +384,7 @@ function setup_ghosts()
   softcut.enable(GHOST_A, 1)
   softcut.buffer(GHOST_A, 1)
   softcut.level(GHOST_A, 0.5)
-  softcut.pan(GHOST_A, -0.35)
+  softcut.pan(GHOST_A, -stereo_width)  -- left pan based on width
   softcut.loop(GHOST_A, 1)
   softcut.loop_start(GHOST_A, 0)
   softcut.loop_end(GHOST_A, BUFFER_LEN)
@@ -373,7 +402,7 @@ function setup_ghosts()
   softcut.enable(GHOST_B, 1)
   softcut.buffer(GHOST_B, 1)
   softcut.level(GHOST_B, 0.35)
-  softcut.pan(GHOST_B, 0.35)
+  softcut.pan(GHOST_B, stereo_width)   -- right pan based on width
   softcut.loop(GHOST_B, 1)
   softcut.loop_start(GHOST_B, 0)
   softcut.loop_end(GHOST_B, BUFFER_LEN)
@@ -437,6 +466,23 @@ end
 -- PARAMETER UPDATE FUNCTIONS
 -- =============================================
 
+function apply_decay_curve(age)
+  -- Apply the selected decay curve shape to the age value
+  -- age: 0.0 (fresh) to 1.0 (dead)
+  if decay_curve == "linear" then
+    return age
+  elseif decay_curve == "logarithmic" then
+    -- slower initial decay, faster at end
+    return math.log(age + 1) / math.log(2)
+  elseif decay_curve == "s_curve" then
+    -- slow -> fast -> slow (sigmoid-like)
+    local s = age * math.pi
+    return 0.5 + 0.5 * math.sin(s - math.pi / 2)
+  else -- exponential (default)
+    return age * age
+  end
+end
+
 function update_entropy()
   -- half_life_val: 0.01 (slow decay) to 1.0 (rapid decay)
   local rate = 0.3 + half_life_val * 3.0
@@ -446,6 +492,12 @@ function update_entropy()
   pre = pre - (entropy_surge * 0.04)
   softcut.rate(ENTROPY, rate)
   softcut.pre_level(ENTROPY, math.max(0.8, pre))
+end
+
+function update_stereo_pan()
+  -- Update panning for ghost voices based on stereo_width
+  softcut.pan(GHOST_A, -stereo_width)
+  softcut.pan(GHOST_B, stereo_width)
 end
 
 function update_levels()
@@ -529,6 +581,20 @@ function beat_clock()
   while true do
     clock.sleep(0.01)
     beat_phase = (beat_phase + 0.01) % 1.0
+  end
+end
+
+function k2_hold_clock()
+  -- Monitor K2 hold time for freeze trigger (>0.5s)
+  while true do
+    clock.sleep(0.01)
+    if k2_held then
+      k2_hold_time = k2_hold_time + 0.01
+      -- trigger freeze when K2 held >0.5s
+      if k2_hold_time > 0.5 and not frozen then
+        activate_freeze()
+      end
+    end
   end
 end
 
@@ -848,6 +914,26 @@ function wipe_buffer()
     seg_pin_count[i] = 0
   end
   entropy_surge = 0
+  frozen = false
+  k2_hold_time = 0
+end
+
+function activate_freeze()
+  -- Lock playback to a small loop at current position
+  frozen = true
+  freeze_pos = ghost_a_pos
+  softcut.loop_start(GHOST_A, math.max(0, freeze_pos - freeze_size / 2))
+  softcut.loop_end(GHOST_A, math.min(BUFFER_LEN, freeze_pos + freeze_size / 2))
+  softcut.loop(GHOST_A, 1)
+end
+
+function release_freeze()
+  -- Restore normal playback
+  frozen = false
+  k2_hold_time = 0
+  softcut.loop_start(GHOST_A, 0)
+  softcut.loop_end(GHOST_A, BUFFER_LEN)
+  softcut.loop(GHOST_A, 1)
 end
 
 -- =============================================
@@ -877,12 +963,19 @@ function key(n, z)
   if n == 2 then
     k2_held = z == 1
     if z == 1 then
+      k2_hold_time = 0
       if k3_held then
         wipe_buffer()
       else
         ringmod_on = not ringmod_on
         engine.ringmod_amt(ringmod_on and 1 or 0)
       end
+    else
+      -- K2 released
+      if frozen then
+        release_freeze()
+      end
+      k2_hold_time = 0
     end
   elseif n == 3 then
     k3_held = z == 1
@@ -995,6 +1088,13 @@ function redraw()
   screen.rect(123, 1, 3, 3)
   screen.fill()
 
+  -- Freeze indicator
+  if frozen then
+    screen.level(15)
+    screen.move(118, 7)
+    screen.text("FRZE")
+  end
+
   -- Memory bank slot indicator (right side, level 6)
   screen.level(6)
   screen.move(100, 7)
@@ -1057,19 +1157,21 @@ function redraw()
   -- draw segment health bars with enhanced ghost aging
   for i = 1, NUM_SEG do
     local age = seg_age[i]
-    local life = 1.0 - age
+    -- apply decay curve to visual representation
+    local curved_age = apply_decay_curve(age)
+    local life = 1.0 - curved_age
     local x = bx + (i - 1) * sw
 
     -- corruption zone: background fill for degraded segments
-    if age > 0.2 then
-      screen.level(math.floor(age * 3) + 1)
+    if curved_age > 0.2 then
+      screen.level(math.floor(curved_age * 3) + 1)
       screen.rect(x, by, sw, bh)
       screen.fill()
     end
 
     -- entropy visual noise: randomly flicker pixels proportional to entropy
     if entropy_surge > 0.1 then
-      local noise_probability = entropy_surge * age * 0.4
+      local noise_probability = entropy_surge * curved_age * 0.4
       if math.random() < noise_probability then
         screen.level(2)
         local nx = x + math.random(sw)
@@ -1083,7 +1185,7 @@ function redraw()
     if life > 0.02 then
       local bar_h = math.floor(life * (bh - 2))
       -- ghost aging brightness: newer ghosts brighter (level 10), older dimmer (level 3)
-      local ghost_brightness = util.linlin(0, 1, 10, 3, age)
+      local ghost_brightness = util.linlin(0, 1, 10, 3, curved_age)
       screen.level(math.floor(ghost_brightness))
       screen.rect(x + 1, by + bh - 1 - bar_h, sw - 2, bar_h)
       screen.fill()
@@ -1100,6 +1202,19 @@ function redraw()
   -- frame
   screen.level(3)
   screen.rect(bx, by, bw, bh)
+  screen.stroke()
+
+  -- buffer fill level meter (below frame)
+  screen.level(6)
+  local fill_level = write_pos / BUFFER_LEN
+  screen.move(bx, by + bh + 2)
+  screen.text("FILL")
+  local meter_w = math.floor(fill_level * 60)
+  screen.level(8)
+  screen.rect(bx + 26, by + bh, meter_w, 3)
+  screen.fill()
+  screen.level(3)
+  screen.rect(bx + 26, by + bh, 60, 3)
   screen.stroke()
 
   -- write head with motion blur trail
@@ -1187,6 +1302,11 @@ function redraw()
   screen.move(42, 58)
   screen.text("ghosts:" .. ghost_count)
 
+  -- decay curve indicator
+  screen.level(5)
+  screen.move(88, 58)
+  screen.text("crv:" .. decay_curve:sub(1, 4))
+
   -- sidechain state indicator
   screen.level(5)
   if sidechain_mode then
@@ -1211,7 +1331,7 @@ function redraw()
   screen.level(3)
   screen.font_size(8)
   screen.move(2, 128)
-  screen.text("K2:ring  K3:ghost  K2+3:wipe")
+  screen.text("K2:ring/frz  K3:ghost  K2+3:wipe")
 
   -- failure rate indicator (bottom right)
   if failure_rate_val > 0.01 then
@@ -1219,6 +1339,11 @@ function redraw()
     screen.move(104, 128)
     screen.text("pkt " .. string.format("%.0f", failure_rate_val * 100))
   end
+
+  -- stereo width indicator
+  screen.level(5)
+  screen.move(88, 128)
+  screen.text("wd:" .. string.format("%.1f", stereo_width))
 
   screen.update()
 end
