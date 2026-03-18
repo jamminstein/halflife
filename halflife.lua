@@ -194,7 +194,7 @@ function init()
   params:add_option("hl_exit_interval", "exit interval", EXIT_NAMES, 1)
   params:set_action("hl_exit_interval", function(v)
     local semi = EXIT_SEMITONES[v]
-    softcut.rate(EXIT, math.pow(2, semi / 12))
+    softcut.rate(EXIT, 2 ^ (semi / 12))
   end)
 
   params:add_control("hl_exit_reverb", "exit reverb send",
@@ -400,7 +400,7 @@ function setup_exit()
   softcut.loop_start(EXIT, 0)
   softcut.loop_end(EXIT, BUFFER_LEN)
   softcut.position(EXIT, BUFFER_LEN * 0.75)
-  softcut.rate(EXIT, math.pow(2, 7 / 12))
+  softcut.rate(EXIT, 2 ^ (7 / 12))
   softcut.play(EXIT, 1)
   softcut.rec(EXIT, 0)
   softcut.level_input_cut(1, EXIT, 0)
@@ -698,7 +698,7 @@ function wobble_clock()
     -- Exit: very slight drift on top of pitch shift
     if not failure_active[EXIT] then
       local exit_semi = EXIT_SEMITONES[params:get("hl_exit_interval")]
-      local base_rate = math.pow(2, exit_semi / 12)
+      local base_rate = 2 ^ (exit_semi / 12)
       local age_e = get_age_at_pos(exit_pos)
       local wow_e = math.sin(wobble_t * 0.4) * age_e * 0.015
       softcut.rate(EXIT, base_rate + wow_e)
@@ -790,7 +790,7 @@ function trigger_rate_glitch(v, age)
     -- (exit voice uses pitch-shifted base rate)
     if v == EXIT then
       local semi = EXIT_SEMITONES[params:get("hl_exit_interval")]
-      softcut.rate(v, math.pow(2, semi / 12))
+      softcut.rate(v, 2 ^ (semi / 12))
     else
       softcut.rate(v, 1.0)
     end
