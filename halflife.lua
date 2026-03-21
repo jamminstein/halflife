@@ -129,6 +129,7 @@ local g = grid.connect()
 
 -- screen animation
 local screen_metro
+local clock_ids = {}
 local wobble_t = 0
 
 -- Enhanced screen state
@@ -321,13 +322,13 @@ function init()
   -- =============================================
   -- CLOCKS
   -- =============================================
-  clock.run(degradation_clock)
-  clock.run(ghost_clock)
-  clock.run(wobble_clock)
-  clock.run(failure_clock)    -- Lossy packet events
-  clock.run(sidechain_clock)  -- Sidechain trigger monitor
-  clock.run(beat_clock)       -- Beat phase tracking
-  clock.run(k2_hold_clock)    -- K2 hold time tracker for freeze
+  clock_ids[1] = clock.run(degradation_clock)
+  clock_ids[2] = clock.run(ghost_clock)
+  clock_ids[3] = clock.run(wobble_clock)
+  clock_ids[4] = clock.run(failure_clock)    -- Lossy packet events
+  clock_ids[5] = clock.run(sidechain_clock)  -- Sidechain trigger monitor
+  clock_ids[6] = clock.run(beat_clock)       -- Beat phase tracking
+  clock_ids[7] = clock.run(k2_hold_clock)    -- K2 hold time tracker for freeze
 
   -- =============================================
   -- SCREEN
@@ -951,7 +952,12 @@ end
 -- =============================================
 
 function cleanup()
-  screen_metro:stop()
+  -- Cancel all tracked clocks
+  for _, cid in ipairs(clock_ids) do
+    if cid then clock.cancel(cid) end
+  end
+  clock_ids = {}
+  if screen_metro then screen_metro:stop() end
   softcut.poll_stop_phase()
   -- Release all softcut voices
   for v = 1, 5 do
