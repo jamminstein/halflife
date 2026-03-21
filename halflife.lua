@@ -628,6 +628,7 @@ function key(k, z)
       k1_held = false
     end
   -- ... rest of key function
+  end
 end
 
 local k1_clock = clock.run(function()
