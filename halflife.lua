@@ -852,6 +852,9 @@ function trigger_rate_glitch(v, age)
   softcut.rate(v, glitch_rate)
   clock.run(function()
     clock.sleep(0.06 + math.random() * 0.1)
+    -- restore position and rate after glitch
+    -- reset buffer head position on packet recovery
+    softcut.position(v, voice_pos(v))
     -- restore rate before releasing lock
     -- (exit voice uses pitch-shifted base rate)
     if v == EXIT then
@@ -1356,4 +1359,8 @@ function cleanup()
   clock.cancel_all()
   if screen_metro then screen_metro:stop() end
   softcut.poll_stop_phase()
+  -- Release all softcut voices
+  for v = 1, 5 do
+    softcut.level(v, 0)
+  end
 end
